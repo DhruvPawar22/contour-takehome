@@ -1,0 +1,9 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Placeholder — locked down until Phase 3 implements role-based rules (see PLANNING.md, section 5).
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}
