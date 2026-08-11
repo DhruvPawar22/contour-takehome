@@ -1,3 +1,11 @@
 {
-  "version": 2
+  "version": 2,
+  "buildCommand": "npm run build --prefix frontend",
+  "outputDirectory": "frontend/dist",
+  "crons": [
+    {
+      "path": "/api/roster/sync",
+      "schedule": "0 3 * * *"
+    }
+  ]
 }

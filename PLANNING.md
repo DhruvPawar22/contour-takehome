@@ -315,8 +315,15 @@ Functions."
 
 - Roster API key lives only in backend env vars, sent via the `X-Api-Key` header (confirmed working in
   §2.3), never a query param, never a `VITE_`-prefixed (client-bundled) variable.
-- Synced into a Firestore `staff` collection by a Vercel cron job (hourly — 3 requests/run, far under
-  the 60/hr budget) plus a manual-refresh endpoint for on-demand use during development.
+- Synced into a Firestore `staff` collection by a Vercel cron job, plus the same endpoint doubling as a
+  manual-refresh for on-demand use during development (`curl -H "Authorization: Bearer $CRON_SECRET"`).
+  **Corrected during phase 2 build:** originally planned as hourly, but Vercel's Hobby plan caps cron
+  jobs at once per day — any more frequent schedule fails at deploy time, not just at runtime, so this
+  would have blocked deployment entirely had it shipped as written. Roster staff/class data changes
+  rarely, so daily is more than sufficient (roles don't need to propagate within the hour), and the
+  3-request-per-run cost against the 60/hr key budget was never the real constraint anyway. Cron
+  schedule set to `0 3 * * *` in `vercel.json`; the `/api/roster/sync` endpoint itself is unaffected —
+  it can still be called manually as often as needed within the API key's rate limit.
 - Frontend and Firestore security rules read roles/classes from `staff`; nothing ever calls the roster
   API directly from the client, and no role is ever hardcoded.
 - Feedback rows whose `Class` doesn't match any known roster class string are still stored (visible to
