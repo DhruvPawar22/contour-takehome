@@ -76,24 +76,64 @@ tiers computed correctly (25 tier-1 / 16 tier-2 / 53 tier-3), Melbourne timestam
 - `vercel.json` gained `buildCommand`/`outputDirectory` pointing at `frontend/dist` — needed once an
   actual deploy was attempted (see "Notable fixes" #7).
 
-**Phases 3-6: not started.**
+**Phase 3 — Auth & rules: complete and verified live against the real deployed rules (not just unit
+tests).** Exit criterion met: each seeded role signs in and gets exactly the scoped/redacted data,
+confirmed by actually signing in as each seeded account and hitting the Firestore REST API directly
+with their real ID tokens (not the Admin SDK, which bypasses all rules) — see "Notable fixes" #11 for
+the full result table.
+- **Data model correction:** `feedback/{rowId}` originally held `parentName`/`studentName` inline (phase
+  2 design). Firestore rules can only allow-or-deny a whole document on read, never individual fields,
+  so that design could never actually redact names for tutors — only fully show or fully hide the whole
+  document. Split into `feedback/{rowId}` (everything except names) and a new `feedbackPii/{rowId}`
+  (just `parentName`/`studentName`, lead/coordinator only). PLANNING.md §3.1/§4/§5 updated. The 94
+  already-ingested real rows were migrated live (PII moved out of `feedback`, into `feedbackPii`,
+  verified field-by-field, no data lost).
+- `api/_lib/feedbackDoc.ts` — `buildFeedbackDocs()`, pure function extracted from `ingest.ts` that
+  builds both documents from one payload. Makes the redaction guarantee directly unit-testable: a test
+  asserts `parentName`/`studentName` never appear anywhere in the `feedback`-bound object.
+- `api/_lib/access.ts` — `classBelongsToTutor()` / `canSeeFeedback()`, a plain-JS mirror of
+  `firestore.rules`' access logic, kept in sync by hand (rules aren't JS, can't literally share code)
+  so the intended semantics are unit-tested even without an emulator.
+- `firestore.rules` — real rules replacing the phase-1 lockdown: `feedback` read/update scoped by
+  role/class (update restricted to only `handled`/`handledBy`/`handledAt` changing), `feedbackPii` read
+  restricted to lead/coordinator, `staff` read for any authenticated user, everything write-restricted
+  to the Admin SDK. Deployed live via `firebase deploy --only firestore:rules`.
+- `api/auth/sync-role.ts` — POST endpoint. Verifies the caller's own Firebase ID token (never a
+  client-supplied uid/email — no role-escalation path), looks up `staff/{email}` for that verified
+  email, sets `{role, classes}` as custom claims via `setCustomUserClaims`. Frontend (phase 4) must call
+  this once after sign-in and then force-refresh the ID token (`getIdToken(true)`) for the new claims to
+  take effect in Firestore reads.
+- `scripts/seed-test-accounts.js` — idempotent (safe to re-run), creates/updates one Firebase Auth
+  email/password account per role using real roster identities: `marcus.chen@...` (lead),
+  `nadia.rahman@...` (coordinator), `rohan.iyer@...` (tutor). Sets custom claims directly too, so the
+  accounts are usable immediately without waiting on the phase-4 frontend to call `sync-role`. Shared
+  password in root `.env` as `TEST_ACCOUNT_PASSWORD` — goes in the grader-facing memo (phase 6), never
+  committed.
+- 18 unit tests, `npm test` (`node --test`, zero new dependencies — matches this repo's established
+  minimal-dependency pattern): full `computePriorityTier` rule matrix, `access.ts`'s class-scoping
+  semantics (including the empty-`classes[]` tutor edge case from PLANNING §2.3), the redaction
+  guarantee in `feedbackDoc.ts`, and a regression test locking in the roster pagination-dedup fix from
+  phase 2 (mocks `fetch`, asserts an overlapping record across two pages is deduped).
+
+**Phases 4-6: not started.**
 
 ## Local environment state
 
 - Root `.env` (gitignored, never committed): `FIREBASE_SERVICE_ACCOUNT_KEY`, `ROSTER_API_KEY`,
-  `GEMINI_API_KEY`, `INGEST_WEBHOOK_SECRET`, and `CRON_SECRET` all set (last two generated in phase 2 via
-  `crypto.randomBytes(32).toString('hex')`). `.env.example` updated to match — still blank there.
+  `GEMINI_API_KEY`, `INGEST_WEBHOOK_SECRET`, `CRON_SECRET`, and (phase 3) `TEST_ACCOUNT_PASSWORD` all
+  set. `.env.example` updated to match — still blank there.
 - `frontend/.env` (gitignored): all six `VITE_FIREBASE_*` values set from the real `contour-takehome`
-  web app config. `VITE_API_BASE_URL` still blank (filled in once the api is deployed — not needed yet,
-  frontend build hasn't started).
+  web app config. `VITE_API_BASE_URL` still blank (filled in once phase 4 frontend build starts).
 - `npm audit`, frontend: 0 vulnerabilities. Root: **6 moderate**, all transitive through
   `firebase-admin` → `@google-cloud/storage` → `teeny-request`/`gaxios` → `uuid` (buffer-bounds-check
   advisory in `uuid`'s v3/v5/v6 generation). We never call `uuid` or the Storage APIs directly — only
   Firestore — so this is dead-code exposure, not a reachable path. `npm audit fix --force` would
   downgrade `firebase-admin` to `10.3.0` (three-plus years old), which is worse. Left as-is; flagged for
   the decision memo, same treatment as the phase 1 `@vercel/node` call.
-- Firebase CLI and Vercel CLI installed globally. Vercel CLI is authenticated. Firebase CLI is not
-  (intentional, see below).
+- Firebase CLI and Vercel CLI both installed globally **and authenticated** (`firebase login` completed
+  in phase 3 — was deliberately deferred until rules needed deploying, see phase 0/1 notes).
+- `npm test` runs the unit suite (`tsc -p tsconfig.json && node --test "dist/**/*.test.js"`) — see
+  "Notable fixes" #10 for why the glob is quoted literally instead of passing a bare directory.
 
 ## Notable fixes made this session — a fresh session should know these before touching git or `api/`
 
@@ -171,11 +211,29 @@ tiers computed correctly (25 tier-1 / 16 tier-2 / 53 tier-3), Melbourne timestam
    or a trigger with a nonzero error rate, check for exactly this class of bug first** — it's almost
    always a definition/call-site name mismatch, not a logic bug.
 
+10. **`node --test <bare directory>` doesn't work reliably in this Node version (24.16.0) — fails with
+    `MODULE_NOT_FOUND`, treating the directory name as a file to require.** Passing a literal glob
+    pattern string instead (`node --test "dist/**/*.test.js"`) works correctly — Node resolves the glob
+    itself. `package.json`'s `test` script uses the quoted-glob form for this reason; don't "simplify"
+    it back to a bare `dist` path, it'll break.
+11. **The 94 already-ingested real feedback rows needed a live migration when the PII split landed.**
+    They were written under the old (phase 2) schema with `parentName`/`studentName` inline. A one-off
+    script moved those two fields out into new `feedbackPii/{rowId}` docs and deleted them from
+    `feedback/{rowId}` via `FieldValue.delete()`, verified field-by-field afterward (94 docs in, 94
+    `feedbackPii` docs out, spot-checked samples). Necessary because otherwise a tutor allowed to read
+    an old `feedback` doc for their own class would still receive the PII fields still sitting on it —
+    the new rules only gate the collections, they don't retroactively strip fields from documents
+    written under the old shape.
+
 ## Immediate next step
 
-Phase 2 is done, deployed, and live-verified. Still open from phase 0: confirm Email/Password sign-in is
-toggled on in the Firebase console before phase 3 starts (auth is next).
+Phase 3 is done, deployed, and live-verified — confirmed by actually signing in as the lead, coordinator,
+and tutor test accounts and hitting the Firestore REST API with their real tokens: tutor sees own class
+(200), denied other classes (403), denied all PII (403), can read the staff directory (200); lead and
+coordinator see any class and all PII (200 across the board).
 
-Phase 3 (auth & rules) is next: seeded test accounts, `/api/auth/sync-role`, real Firestore security
-rules, and unit tests for `computePriorityTier` plus the class-matching/redaction logic. Phase 4
-(frontend) can then build against the now-live ingestion pipe and real Firestore data instead of mocks.
+Phase 4 (frontend) is next: login screen, live feedback queue (sorted by priority tier, filterable),
+mark-as-handled, AI summary panel, Contour-styled UI per PLANNING.md §2.4. It can now build against the
+real deployed API and real Firestore data (94 real rows, real roles) instead of mocks. Test sign-ins:
+the three seeded accounts (`marcus.chen@...` / `nadia.rahman@...` / `rohan.iyer@...`
+`@contoureducation.example`), shared password in root `.env` as `TEST_ACCOUNT_PASSWORD`.

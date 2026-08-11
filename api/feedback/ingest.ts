@@ -3,6 +3,7 @@ import { timingSafeEqual } from 'node:crypto';
 import { FieldValue } from 'firebase-admin/firestore';
 import { getDb } from '../_lib/firebaseAdmin';
 import { computePriorityTier } from '../_lib/priority';
+import { buildFeedbackDocs } from '../_lib/feedbackDoc';
 import { readJsonBody, sendJson } from '../_lib/http';
 
 const CONTINUING_VALUES = new Set(['Yes', 'Not sure', 'No']);
@@ -104,21 +105,14 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       comments: body.comments,
     });
 
-    const ref = db.collection('feedback').doc(`row_${body.row_number}`);
-    const sourceData = {
-      timestamp: body.submitted_at,
-      parentName: body.parent_name,
-      studentName: body.student_name,
-      class: body.class_label,
-      tutorEmail,
-      unmatchedClass,
-      rating: body.rating,
-      continuing: body.continuing,
-      contactRequested: body.contact_requested,
-      comments: body.comments,
-      priorityTier,
-      sourceRow: body.row_number,
-    };
+    const rowId = `row_${body.row_number}`;
+    const ref = db.collection('feedback').doc(rowId);
+    // parentName/studentName live in a separate collection with its own security rules (lead/
+    // coordinator only) — Firestore rules can only allow-or-deny a whole document on read, not
+    // individual fields, so genuine tutor redaction requires the PII to never be part of the
+    // document a tutor is allowed to read at all. See PLANNING.md section 3.1/4.
+    const piiRef = db.collection('feedbackPii').doc(rowId);
+    const { feedbackDoc, piiDoc } = buildFeedbackDocs(body, tutorEmail, unmatchedClass, priorityTier);
 
     // Upsert keyed by row number (idempotent by construction — a safety-net retry of an
     // already-ingested row can never duplicate it). Existing handled/handledBy/handledAt/createdAt
@@ -128,15 +122,16 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       const snap = await tx.get(ref);
       if (!snap.exists) {
         tx.set(ref, {
-          ...sourceData,
+          ...feedbackDoc,
           handled: false,
           handledBy: null,
           handledAt: null,
           createdAt: FieldValue.serverTimestamp(),
         });
       } else {
-        tx.set(ref, sourceData, { merge: true });
+        tx.set(ref, feedbackDoc, { merge: true });
       }
+      tx.set(piiRef, piiDoc);
     });
 
     sendJson(res, 200, { ok: true, id: ref.id, priorityTier, tutorEmail, unmatchedClass });

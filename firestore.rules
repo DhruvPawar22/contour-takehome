@@ -1,8 +1,59 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Placeholder — locked down until Phase 3 implements role-based rules (see PLANNING.md, section 5).
-    match /{document=**} {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function role() {
+      return request.auth.token.role;
+    }
+
+    function isLeadOrCoordinator() {
+      return isSignedIn() && role() in ['lead', 'coordinator'];
+    }
+
+    function isTutorForClass(className) {
+      return isSignedIn() && role() == 'tutor' && className in request.auth.token.classes;
+    }
+
+    function canSeeFeedback(data) {
+      return isLeadOrCoordinator() || isTutorForClass(data.class);
+    }
+
+    // Non-PII feedback fields. Readable by lead/coordinator (everything) or by a tutor scoped to
+    // their own classes. Everyone in that same visibility scope may update ONLY the
+    // handled/handledBy/handledAt fields — not the source data. See PLANNING.md section 3.1/4/5
+    // for why parentName/studentName live in a separate feedbackPii collection instead of here:
+    // Firestore rules can only allow-or-deny a whole document, never individual fields, so
+    // redacting names for tutors requires them to never be part of a document a tutor can read.
+    match /feedback/{rowId} {
+      allow read: if canSeeFeedback(resource.data);
+      allow update: if canSeeFeedback(resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['handled', 'handledBy', 'handledAt']);
+      allow create, delete: if false; // backend (Admin SDK) only — ingest is the sole writer
+    }
+
+    // parentName/studentName only — lead/coordinator only, regardless of class. Tutors get no
+    // access at all, which is what makes the redaction server-enforced rather than a client hide.
+    match /feedbackPii/{rowId} {
+      allow read: if isLeadOrCoordinator();
+      allow write: if false; // backend (Admin SDK) only
+    }
+
+    // Any authenticated user can read staff directory info (names, roles, classes) — needed to
+    // render who owns what. Only the roster sync job (Admin SDK) writes it.
+    match /staff/{email} {
+      allow read: if isSignedIn();
+      allow write: if false;
+    }
+
+    // Not yet consumed directly by the client (phase 4) — locked down until something needs it.
+    match /summaries/{scopeKey} {
+      allow read, write: if false;
+    }
+    match /config/{doc} {
       allow read, write: if false;
     }
   }

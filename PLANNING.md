@@ -235,8 +235,15 @@ Each entry tagged by who actually made the call.
   coordinators. I'm grouping coordinators with lead (full access) since they're operational staff, not
   the "casual tutors" his original message singled out — but this is my inference, not his explicit
   word, and I'm flagging it in the decision memo as something to confirm before a real rollout.
-  Enforcement is server-driven (Firestore security rules keyed off a role synced from the roster, plus
-  field-level redaction in the client for the name fields) — never a client-side "hide this div" toggle.
+- **Enforcement is server-driven, not a client-side "hide this div" toggle — and phase 3 corrected how
+  that's actually achieved.** Firestore security rules can only allow-or-deny an entire document on
+  read; they cannot expose some fields of a document while hiding others. So a single `feedback/{rowId}`
+  doc containing `parentName`/`studentName` inline (as originally sketched in §4) could never be
+  genuinely redacted for tutors via rules — only fully visible or fully hidden. Fixed in phase 3 by
+  splitting storage: `feedback/{rowId}` holds everything except the two name fields (readable by
+  lead/coordinator, and by tutors scoped to their own classes), and a new `feedbackPii/{rowId}` holds
+  just `parentName`/`studentName`, readable only by lead/coordinator. A tutor's client never receives
+  the PII bytes over the wire at all — there's nothing to hide client-side because it was never sent.
 
 ### 3.2 Queue priority — **Marcus's call, formalized by me**
 
@@ -346,17 +353,21 @@ Functions."
 ## 4. Data model (Firestore)
 
 ```
-staff/{email}          { name, email, role: 'lead'|'coordinator'|'tutor', classes: string[], updatedAt }
-feedback/{rowId}        { timestamp, parentName, studentName, class, tutorEmail | null, unmatchedClass: bool,
+staff/{email}           { name, email, role: 'lead'|'coordinator'|'tutor', classes: string[], updatedAt }
+feedback/{rowId}        { timestamp, class, tutorEmail | null, unmatchedClass: bool,
                           rating, continuing, contactRequested, comments,
                           priorityTier: 1|2|3, handled: bool, handledBy, handledAt,
                           sourceRow: number, createdAt }
+feedbackPii/{rowId}      { parentName, studentName }
 summaries/{scopeKey}     { scope, text, generatedAt, basedOnCount }
 config/rosterSync        { lastSyncedAt, lastPageCount }
 ```
 
 `rowId` = deterministic (`row_<sheet row number>`) so ingestion writes are upserts, not appends —
-duplicate delivery from the safety-net trigger can't create duplicate documents.
+duplicate delivery from the safety-net trigger can't create duplicate documents. Same `rowId` links a
+`feedback` doc to its `feedbackPii` counterpart. The split exists purely for security-rule enforcement
+(see §3.1) — `parentName`/`studentName` moved out of `feedback` so tutor-scoped reads never receive them
+at all. Lead/coordinator views join both collections; tutor views only ever query `feedback`.
 
 ## 5. Security rules sketch
 
@@ -364,6 +375,9 @@ duplicate delivery from the safety-net trigger can't create duplicate documents.
   (`role == 'tutor'` **and** `resource.data.class in request.auth.token.classes`).
 - `feedback` update: same visibility scope, restricted to only the `handled` / `handledBy` / `handledAt`
   fields changing (`request.resource.data.diff(resource.data).affectedKeys()` check).
+- `feedbackPii` read: `request.auth.token.role in ['lead','coordinator']` only — tutors get no access at
+  all, regardless of class. No client ever writes this collection (ingest, backend-only, is the only
+  writer). See §3.1/§4 for why this is a separate collection rather than fields on `feedback`.
 - `staff` read: any authenticated user (needed to render names); write: backend (Admin SDK) only.
 - Custom claims (`role`, `classes`) set server-side by `/api/auth/sync-role` right after login, since
   there's no Cloud Functions auth-trigger available on a card-free plan.
