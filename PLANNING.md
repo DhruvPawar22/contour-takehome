@@ -4,7 +4,8 @@ Single source of truth for this take-home. Written before any code exists, kept 
 get made. If a future session (or a teammate) needs to pick this up cold, this file plus the git log
 should be enough.
 
-Status as of **2026-08-11**: planning complete, questions to Dhruv answered, build not yet started.
+Status: planning complete, questions to Dhruv answered. For current build status (what's actually
+done vs. pending) see [PROGRESS.md](PROGRESS.md) — that file is the one to check after a context clear.
 
 ---
 
