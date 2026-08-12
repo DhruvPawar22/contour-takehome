@@ -12,3 +12,6 @@ firebase-debug.log
 
 .vercel
 .env*
+
+# Contains the real seeded test-account password — deliver to graders separately, never commit.
+DECISION_MEMO.txt
