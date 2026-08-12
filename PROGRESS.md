@@ -115,7 +115,54 @@ the full result table.
   guarantee in `feedbackDoc.ts`, and a regression test locking in the roster pagination-dedup fix from
   phase 2 (mocks `fetch`, asserts an overlapping record across two pages is deduped).
 
-**Phases 4-6: not started.**
+**Phase 4 — Frontend: complete and verified live against the real deployed backend and real
+Firestore data (94 real rows), signed in as all three seeded accounts in an actual browser.**
+Exit criterion met: full flow (login → live scoped/redacted queue → mark handled → AI summary)
+works end-to-end for lead, coordinator, and tutor. Two genuine production bugs were caught and
+fixed only because of that live walkthrough — see "Notable fixes" #12 and #14; neither would have
+been caught by unit tests or a build check alone.
+- `frontend/src/lib/firebase.ts` — Firebase client SDK init (`firebase` package added, 0
+  vulnerabilities) from `VITE_FIREBASE_*` env vars; exports `auth`, `db`, `API_BASE_URL`.
+- `frontend/src/context/AuthContext.tsx` — email/password sign-in, calls `/api/auth/sync-role` and
+  force-refreshes the ID token on every sign-in (including a returning session on page load, not
+  just a fresh login) so custom claims are always current before any Firestore read.
+- `frontend/src/hooks/useFeedback.ts` — live `onSnapshot` on `feedback` (see "Notable fixes" #14
+  for why tutor queries must declare `where('class', 'in', classes)` rather than relying on rules
+  to filter an unscoped query), plus `feedbackPii` for lead/coordinator only. Resets state on every
+  role/classes change so a slower or failed subscription for a newly-signed-in user can never
+  leave a previous user's data on screen in the same tab.
+- `frontend/src/hooks/useStaffDirectory.ts` — live `staff` directory (readable by any
+  authenticated user per firestore.rules) for tutor-name display and the class filter dropdown.
+- `frontend/src/lib/queue.ts` — pure `sortFeedback`/`filterFeedback`/`describeScope`, mirroring the
+  tiering/FIFO rules in PLANNING.md section 3.2 client-side.
+- `frontend/src/pages/Login.tsx`, `Dashboard.tsx` — login screen; live queue with status
+  (Active/Handled/All) and tier filter chips, a class dropdown (lead/coordinator only, since
+  tutors are already scoped), mark-handled/mark-unhandled, and the redaction fallback ("Family —
+  [class]") for tutors, who never even issue the `feedbackPii` subscription in the first place.
+- `frontend/src/components/SummaryPanel.tsx` + `api/summary/generate.ts` — on-demand AI summary of
+  whatever's currently filtered into view. The client sends only the fields the model needs from
+  items it already legitimately fetched under Firestore rules; the endpoint never re-derives or
+  widens that scope, just requires a valid Firebase ID token (so the free Gemini quota isn't open
+  to the internet) and persists to `summaries/{scopeKey}` via Admin SDK for audit (the client never
+  reads that collection back — it gets the text directly in the HTTP response — so
+  firestore.rules' phase-1 lockdown on `summaries` didn't need to change).
+- `api/_lib/summaryPrompt.ts` (+ 7 unit tests), `api/_lib/gemini.ts` — pure prompt builder and a
+  plain `fetch`-based Gemini REST call (no `@google/genai` dependency, matching this repo's
+  minimal-dependency pattern). Model pinned to the `gemini-flash-latest` alias, not a dated
+  snapshot — see "Notable fixes" #13.
+- `api/_lib/cors.ts` — CORS for the two browser-facing endpoints only (`auth/sync-role`,
+  `summary/generate`); `ingest`/`roster/sync` are server-to-server only and deliberately left
+  without it. Frontend (Firebase Hosting) and backend (Vercel) are different origins by design —
+  see PLANNING.md section 3.4.
+- Contour design tokens (cream/navy/lime/pill radius scale, Inter + Space Grotesk via Google
+  Fonts) implemented directly in `frontend/src/index.css` per PLANNING.md section 2.4; default
+  Vite scaffold (App.css, react.svg, vite.svg, hero.png) removed.
+- `frontend/.env`'s `VITE_API_BASE_URL` filled in with the stable `https://contour-takehome.vercel.app`
+  alias (not a per-deployment `*.vercel.app` URL).
+- `.claude/launch.json` added (`npm run dev --prefix frontend` on port 5173) so the dev server can
+  be previewed without recreating this each session.
+
+**Phases 5-6: not started.**
 
 ## Local environment state
 
@@ -123,13 +170,16 @@ the full result table.
   `GEMINI_API_KEY`, `INGEST_WEBHOOK_SECRET`, `CRON_SECRET`, and (phase 3) `TEST_ACCOUNT_PASSWORD` all
   set. `.env.example` updated to match — still blank there.
 - `frontend/.env` (gitignored): all six `VITE_FIREBASE_*` values set from the real `contour-takehome`
-  web app config. `VITE_API_BASE_URL` still blank (filled in once phase 4 frontend build starts).
-- `npm audit`, frontend: 0 vulnerabilities. Root: **6 moderate**, all transitive through
-  `firebase-admin` → `@google-cloud/storage` → `teeny-request`/`gaxios` → `uuid` (buffer-bounds-check
-  advisory in `uuid`'s v3/v5/v6 generation). We never call `uuid` or the Storage APIs directly — only
-  Firestore — so this is dead-code exposure, not a reachable path. `npm audit fix --force` would
-  downgrade `firebase-admin` to `10.3.0` (three-plus years old), which is worse. Left as-is; flagged for
-  the decision memo, same treatment as the phase 1 `@vercel/node` call.
+  web app config, plus (phase 4) `VITE_API_BASE_URL=https://contour-takehome.vercel.app`.
+- `npm audit`, frontend: 0 vulnerabilities (`firebase` client SDK added in phase 4, no new advisories).
+  Root: **6 moderate**, all transitive through `firebase-admin` → `@google-cloud/storage` →
+  `teeny-request`/`gaxios` → `uuid` (buffer-bounds-check advisory in `uuid`'s v3/v5/v6 generation). We
+  never call `uuid` or the Storage APIs directly — only Firestore — so this is dead-code exposure, not a
+  reachable path. `npm audit fix --force` would downgrade `firebase-admin` to `10.3.0` (three-plus years
+  old), which is worse. Left as-is; flagged for the decision memo, same treatment as the phase 1
+  `@vercel/node` call. Unrelated to this, root `package.json` also gained an `overrides` entry pinning
+  `jose` to `5.10.0` in phase 4 — that one's a hard functional fix, not an audit-severity call, see
+  "Notable fixes" #13.
 - Firebase CLI and Vercel CLI both installed globally **and authenticated** (`firebase login` completed
   in phase 3 — was deliberately deferred until rules needed deploying, see phase 0/1 notes).
 - `npm test` runs the unit suite (`tsc -p tsconfig.json && node --test "dist/**/*.test.js"`) — see
@@ -225,15 +275,129 @@ the full result table.
     the new rules only gate the collections, they don't retroactively strip fields from documents
     written under the old shape.
 
+12. **`api/auth/sync-role.ts` had been silently broken in production since phase 3, undetected
+    until phase 4's frontend actually called it live.** Root cause: it imported `getAuth` directly
+    from `'firebase-admin/auth'` and called it as its *first* Admin SDK operation. That bare
+    `getAuth()` resolves the *default* Firebase app via its own lifecycle lookup; nothing had
+    called `initializeApp()` yet in that code path (that only happened later, inside `getDb()`, or
+    not at all if the handler returned before reaching it). On a cold Vercel invocation this threw
+    `FirebaseAppError: The default Firebase app does not exist` — caught by a generic `catch {}`
+    and reported to the client as a plain "invalid or expired token" 401, indistinguishable from an
+    actually-bad token. Phase 3's "live verification" (see #11's note above) tested Firestore
+    rules directly via REST calls using tokens whose custom claims were already set by
+    `scripts/seed-test-accounts.js` — it never actually invoked this deployed endpoint, so the bug
+    sat live and undetected through all of phase 3. Fixed by adding `getAdminAuth()` to
+    `api/_lib/firebaseAdmin.ts`, which guarantees `getAdminApp()` (and thus `initializeApp()`) runs
+    first; `sync-role.ts` and `summary/generate.ts` now import `getAdminAuth` from there instead of
+    a bare `firebase-admin/auth` import. **Any new endpoint that needs Firebase Auth (not just
+    Firestore) must go through `getAdminAuth()`, never `getAuth()` imported directly — grep for
+    `from 'firebase-admin/auth'` outside `_lib/firebaseAdmin.ts` if this class of bug resurfaces.**
+13. **`firebase-admin@14.2.0`'s dependency chain crashes on Vercel with `ERR_REQUIRE_ESM`,
+    independent of #12.** `firebase-admin`'s `utils/jwt.js` does a top-level `require('jwks-rsa')`,
+    which depends on `jose@6.2.8` — an ESM-only package as of v6 — via a synchronous `require()`.
+    Because this `require` sits at module load time, *any* function that imports anything from
+    `firebase-admin/auth` crashes immediately on Vercel's Node runtime, before any of the
+    handler's own code runs. Fixed with an npm `overrides` entry pinning `jose` to `5.10.0` (last
+    major with real CJS support) in the root `package.json` — `npm install` after adding it
+    correctly re-resolves the nested `node_modules/jwks-rsa/node_modules/jose` copy. **Do not bump
+    `firebase-admin` past 14.x without first checking whether the override is still needed** (i.e.
+    whether `jwks-rsa`/`jose` have fixed the CJS/ESM interop upstream).
+14. **The Gemini model name in `api/_lib/gemini.ts` was originally `gemini-2.5-flash` — a live
+    404 in production** ("no longer available to new users") even though `ListModels` still listed
+    it for this key. Google rotates which dated snapshots are servable per-key without much
+    notice. Fixed by switching to the `gemini-flash-latest` alias, which Google keeps pointed at a
+    current fast/free-tier model. **If summary generation ever 404s again, check
+    `GET /v1beta/models?key=...` against the model name in `gemini.ts` before assuming it's a code
+    bug** — it's almost always the model name going stale, not the request shape.
+15. **Firestore rejects an entirely-unfiltered `list` query outright (`PERMISSION_DENIED`) once the
+    rule depends on per-document data — it does *not* silently filter results the way `get` does.**
+    Confirmed directly against the REST API (`runQuery` with a tutor's real token, no `where`
+    clause, on `feedback`): a flat 403, not a filtered result set. This invalidated the original
+    assumption in PLANNING.md section 5 that an unscoped client query would "just" come back
+    correctly scoped per role. Fixed in `frontend/src/hooks/useFeedback.ts`: lead/coordinator still
+    query `feedback` unfiltered (the rule for them is unconditionally true, which Firestore *can*
+    prove without inspecting per-doc data, so that query is allowed); tutors now query with
+    `where('class', 'in', classes)`, mirroring the rule's own condition exactly. A tutor with an
+    empty `classes[]` (the Ethan Moreau edge case, PLANNING.md section 2.3) skips the subscription
+    entirely rather than issuing a `where('class', 'in', [])` — Firestore throws at query
+    *construction* time for an empty `in` array, before the request ever goes out.
+16. **Compounding #15: switching between roles in the same browser tab (sign out, sign back in as
+    someone else, no full reload) left the previous user's feedback items on screen.** `useFeedback`
+    never cleared its `items` state when the tutor query above failed outright — the successful
+    coordinator snapshot from moments earlier just sat in React state untouched, since the error
+    callback only set an error message, never cleared data. This is exactly the class of bug a
+    unit test can't catch (there's no unit around a live `onSnapshot` subscription) and manual
+    testing did: signing in as coordinator then tutor, in the same tab, showed the tutor account
+    all 94 rows instead of their own ~19. Fixed by resetting `items`/`piiById` at the start of every
+    role/classes change and on any subscription error, not just on success.
+17. **The AI summary rendered with raw, unparsed markdown** (`**bold**`, `### headers`, `---`,
+    emoji) because `SummaryPanel.tsx` renders the response as plain text (`white-space: pre-wrap`
+    in a `<p>`), not through a markdown parser — and adding one just for this panel wasn't worth a
+    new dependency. Fixed at the source instead: `api/_lib/summaryPrompt.ts`'s prompt now
+    explicitly instructs Gemini to output plain text only (no asterisks/`#`/`---`/backticks/emoji,
+    section labels as a plain line ending in a colon, list items as a leading dash) — verified live
+    against the deployed endpoint with mixed-sentiment test data, response contains no markdown
+    characters and renders cleanly with the existing plain-text styling.
+18. **A real ingestion incident, caused by the form-relinking workaround itself (`Form Responses 1`
+    is view-only for Dhruv — see PLANNING.md section 7 and the "how do I add it to the original
+    sheet" thread): swapping in a replacement tab under that same name broke the row-based
+    idempotency scheme.** `feedback`/`feedbackPii` document IDs were `row_<sheet row number>` —
+    fine as long as exactly one tab named `Form Responses 1` exists for the sheet's entire
+    lifetime, but the new tab's row numbering restarts from 1, so its row 2 and row 3 collided
+    with the *historical* tab's row 2 and row 3. Confirmed live: a first test submission (row 2)
+    landed nowhere in Firestore (see next paragraph for why), and a second (row 3) silently
+    overwrote a real historical feedback doc's content in place. **Not a one-time fluke** — every
+    future submission through the new tab would keep colliding with (and silently corrupting)
+    historical rows 4 through 95 until the new tab's own count finally passed 95.
+    - Root cause of the *first* row going missing entirely (compounding the collision issue):
+      `pushRow_`'s pointer-advancement wasn't scoped to the safety net's own ordered sweep — the
+      live `onFormSubmitInstalled_` event path called it too. Row 3's live event apparently fired
+      and succeeded while row 2's didn't (plausible propagation lag right after linking a new form
+      to the spreadsheet), and that success alone advanced `LAST_SYNCED_ROW` to 3 — so by the time
+      any 5-minute safety-net sweep ran, it started scanning from row 4, permanently unable to loop
+      back for row 2. Fixed in `apps-script/Code.gs`: only `syncSafetyNet_`'s own sequential sweep
+      advances `LAST_SYNCED_ROW` now, and only through the longest *unbroken* run of successes
+      starting right after the current pointer — a later row succeeding out of order can no longer
+      strand an earlier one. The event trigger still pushes immediately for low latency, it just
+      never touches the pointer. Every row in range is still retried every sweep regardless, so a
+      genuinely transient failure still self-heals on the next pass instead of blocking forever.
+    - Root cause of the *collision/overwrite* itself: fixed by keying documents off
+      `(sheet_id, row_number)` together instead of `row_number` alone. `sheet_id` is
+      `sheet.getSheetId()` — a tab's stable internal ID, assigned once at creation, unchanged by
+      renames, always fresh for a brand-new tab — added to the Apps Script payload
+      (`buildPayload_`) and to `api/feedback/ingest.ts`'s validation and `rowId` construction
+      (`row_${sheet_id}_${row_number}`). This permanently prevents this exact class of collision
+      even if a tab gets swapped again in the future, with no migration of historical data needed —
+      old docs keep their old `row_<n>` IDs untouched, only new ingests use the new format.
+    - The two actual test rows from this incident were manually verified into Firestore directly
+      (row 2 via a one-off authenticated call to `/api/feedback/ingest` with its real field values,
+      row 3 already correct from the live trigger's earlier success) — both still under the old
+      `row_<n>` ID format from before this fix landed, which is harmless: they're correct content,
+      just an old-style ID, and nothing dedupes against them going forward. **If a fresh session
+      needs to relink a form to a sheet again, expect this exact class of bug and check whether the
+      relevant tab is truly a fresh tab (new row numbering) before assuming row numbers are safe to
+      reuse as document identity.**
+    - **Confirmed fixed live, end to end, after both patches landed:** Dhruv re-pasted the updated
+      `Code.gs`, submitted a fresh response through the new form, and it appeared correctly and
+      immediately in the deployed dashboard with no manual intervention — the same sequence the
+      walkthrough video needs to show (form → sheet → app, live). This is also the first time the
+      *entire* pipe was exercised through a real Google Form rather than a direct API call or the
+      original historical backfill, so it's a stronger confirmation of phase 2's exit criterion than
+      what existed before this session.
+
 ## Immediate next step
 
-Phase 3 is done, deployed, and live-verified — confirmed by actually signing in as the lead, coordinator,
-and tutor test accounts and hitting the Firestore REST API with their real tokens: tutor sees own class
-(200), denied other classes (403), denied all PII (403), can read the staff directory (200); lead and
-coordinator see any class and all PII (200 across the board).
+Phase 4 is done and live-verified end-to-end in a real browser against the real deployed backend and
+real Firestore data — signed in as all three seeded accounts and confirmed: lead and coordinator both
+see all 94 rows with real names and can generate an AI summary and mark items handled; tutor
+(rohan.iyer) sees exactly their own 19 rows across their 5 classes, names redacted to "Family — [class]",
+no class filter shown, and can still summarize/mark-handled within that scope. Two real production bugs
+(sync-role's cold-start crash, and the tutor query being outright rejected instead of filtered) were
+only caught because of this live walkthrough — see "Notable fixes" #12 and #15/#16.
 
-Phase 4 (frontend) is next: login screen, live feedback queue (sorted by priority tier, filterable),
-mark-as-handled, AI summary panel, Contour-styled UI per PLANNING.md §2.4. It can now build against the
-real deployed API and real Firestore data (94 real rows, real roles) instead of mocks. Test sign-ins:
-the three seeded accounts (`marcus.chen@...` / `nadia.rahman@...` / `rohan.iyer@...`
-`@contoureducation.example`), shared password in root `.env` as `TEST_ACCOUNT_PASSWORD`.
+Phase 5 (deploy & verify) is next: `firebase deploy --only hosting` to publish the frontend build to
+Firebase Hosting, add the resulting Hosting origin(s) to `api/_lib/cors.ts`'s allowlist (currently only
+`contour-takehome.web.app`/`contour-takehome.firebaseapp.com` are pre-populated — confirm these match
+what Firebase actually assigns once Hosting is live), then repeat the same three-role smoke test against
+the deployed Hosting URL instead of localhost. Phase 6 (deliverables: README, decision memo,
+#ops-requests announcement, video shot-list, `.zip`) follows once Phase 5's smoke test passes.

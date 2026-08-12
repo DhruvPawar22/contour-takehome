@@ -12,6 +12,7 @@ const YES_NO_VALUES = new Set(['Yes', 'No']);
 interface IngestPayload {
   secret: string;
   row_number: number;
+  sheet_id: number;
   submitted_at: string;
   parent_name: string;
   student_name: string;
@@ -29,6 +30,7 @@ function isValidPayload(body: unknown): body is IngestPayload {
     typeof b.secret === 'string' &&
     Number.isInteger(b.row_number) &&
     (b.row_number as number) > 0 &&
+    Number.isInteger(b.sheet_id) &&
     typeof b.submitted_at === 'string' &&
     typeof b.parent_name === 'string' &&
     typeof b.student_name === 'string' &&
@@ -105,7 +107,11 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
       comments: body.comments,
     });
 
-    const rowId = `row_${body.row_number}`;
+    // Keyed off (sheet_id, row_number) together, not row_number alone -- sheet_id is the tab's
+    // stable internal ID (unchanged by renames, always fresh for a newly-created tab), so a
+    // replacement "Form Responses 1" tab whose row numbering restarts from 1 can never collide
+    // with -- and silently overwrite -- historical rows from whichever tab held that name before.
+    const rowId = `row_${body.sheet_id}_${body.row_number}`;
     const ref = db.collection('feedback').doc(rowId);
     // parentName/studentName live in a separate collection with its own security rules (lead/
     // coordinator only) — Firestore rules can only allow-or-deny a whole document on read, not

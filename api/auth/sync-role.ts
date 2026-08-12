@@ -1,7 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
-import { getAuth } from 'firebase-admin/auth';
-import { getDb } from '../_lib/firebaseAdmin';
+import { getAdminAuth, getDb } from '../_lib/firebaseAdmin';
 import { sendJson } from '../_lib/http';
+import { applyCors } from '../_lib/cors';
 
 function extractBearerToken(req: IncomingMessage): string | null {
   const header = req.headers.authorization;
@@ -17,6 +17,7 @@ function extractBearerToken(req: IncomingMessage): string | null {
 // automatically on sign-up. The client must force-refresh its ID token afterward
 // (getIdToken(true)) for the new claims to take effect in subsequent Firestore reads.
 export default async function handler(req: IncomingMessage, res: ServerResponse) {
+  if (applyCors(req, res)) return;
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'method not allowed' });
     return;
@@ -30,7 +31,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
 
   let decoded;
   try {
-    decoded = await getAuth().verifyIdToken(idToken);
+    decoded = await getAdminAuth().verifyIdToken(idToken);
   } catch {
     sendJson(res, 401, { error: 'invalid or expired token' });
     return;
@@ -51,7 +52,7 @@ export default async function handler(req: IncomingMessage, res: ServerResponse)
     }
 
     const { role, classes } = staffDoc.data() as { role: string; classes: string[] };
-    await getAuth().setCustomUserClaims(decoded.uid, { role, classes });
+    await getAdminAuth().setCustomUserClaims(decoded.uid, { role, classes });
 
     sendJson(res, 200, { ok: true, role, classes });
   } catch (err) {

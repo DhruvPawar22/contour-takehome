@@ -16,5 +16,8 @@
   },
   "dependencies": {
     "firebase-admin": "^14.2.0"
+  },
+  "overrides": {
+    "jose": "5.10.0"
   }
 }

@@ -58,6 +58,8 @@ function onFormSubmitInstalled_(e) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
   if (!sheet) return;
   var row = e && e.range ? e.range.getRow() : sheet.getLastRow();
+  // Deliberately does not touch LAST_SYNCED_ROW -- see syncSafetyNet_'s comment for why only the
+  // safety net's own ordered sweep is allowed to move that pointer.
   pushRow_(row);
 }
 
@@ -71,8 +73,25 @@ function syncSafetyNet_() {
   var props = PropertiesService.getScriptProperties();
   var lastSynced = Number(props.getProperty(LAST_SYNCED_ROW_KEY) || 1);
 
+  // LAST_SYNCED_ROW only ever advances through the longest *unbroken* run of successes starting
+  // right after the current pointer. If a later row's live onFormSubmit event fires and succeeds
+  // while an earlier row is still stuck (missed event, or a transient failure), advancing the
+  // pointer past that earlier row would make it permanently unreachable -- this loop only ever
+  // scans forward from the pointer, never back. Every row in range is still retried every sweep
+  // regardless of this, so a row that fails once from a network blip heals itself on the next
+  // 5-minute pass instead of being silently abandoned once something after it succeeds.
+  var contiguousThrough = lastSynced;
+  var sawGap = false;
   for (var row = lastSynced + 1; row <= lastRow; row++) {
-    pushRow_(row);
+    var ok = pushRow_(row);
+    if (ok && !sawGap) {
+      contiguousThrough = row;
+    } else if (!ok) {
+      sawGap = true;
+    }
+  }
+  if (contiguousThrough > lastSynced) {
+    advanceLastSyncedRow_(contiguousThrough);
   }
 }
 
@@ -80,20 +99,25 @@ function syncSafetyNet_() {
 
 function pushRow_(rowNumber) {
   var sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(SHEET_NAME);
-  if (!sheet || rowNumber < 2) return;
+  if (!sheet || rowNumber < 2) return false;
 
   var values = sheet.getRange(rowNumber, 1, 1, 8).getValues()[0];
-  var payload = buildPayload_(values, rowNumber);
+  var payload = buildPayload_(values, rowNumber, sheet.getSheetId());
 
   var ok = sendWithRetry_(payload);
-  if (ok) {
-    advanceLastSyncedRow_(rowNumber);
-  } else {
+  if (!ok) {
     logSyncFailure_(rowNumber, payload);
   }
+  return ok;
 }
 
-function buildPayload_(row, rowNumber) {
+// sheetId is the tab's stable internal ID (assigned once at tab creation, unchanged by renames,
+// always fresh for a newly-created tab) -- not the row number. The backend keys its Firestore
+// document ID off (sheetId, rowNumber) together, not rowNumber alone, specifically so that
+// swapping in a replacement "Form Responses 1" tab (whose row numbering restarts from 1) can
+// never collide with -- and silently overwrite -- historical rows from whichever tab held that
+// name before. See PLANNING.md section 3.5 for the incident this was added to prevent.
+function buildPayload_(row, rowNumber, sheetId) {
   var ts = row[0];
   var submittedAt = ts && ts.getTime
     ? Utilities.formatDate(ts, 'Australia/Melbourne', "yyyy-MM-dd'T'HH:mm:ssXXX")
@@ -102,6 +126,7 @@ function buildPayload_(row, rowNumber) {
   return {
     secret: PropertiesService.getScriptProperties().getProperty(SECRET_KEY) || '',
     row_number: rowNumber,
+    sheet_id: sheetId,
     submitted_at: submittedAt,
     parent_name: String(row[1] || ''),
     student_name: String(row[2] || ''),

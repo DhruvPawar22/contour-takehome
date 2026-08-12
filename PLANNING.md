@@ -347,6 +347,57 @@ Functions."
 - Summarizes whatever is currently filtered/in view (e.g. "all unhandled," a specific class, a date
   range) rather than one fixed daily report — matches "so we don't have to read 200 entries" more
   directly than a single static digest would.
+- **Corrected during phase 4 build:** the client sends the feedback items it already fetched (already
+  rule-scoped) directly in the request body, rather than the endpoint re-querying Firestore by scope
+  itself. Simpler, and it means the endpoint never re-derives or could accidentally widen a visibility
+  scope the client already correctly narrowed. Persisted to `summaries/{scopeKey}` via Admin SDK purely
+  for audit/data-model completeness — the client gets the text back directly in the HTTP response and
+  never reads that collection, so its phase-1 `allow read, write: if false` lockdown in `firestore.rules`
+  never needed to change.
+
+### 3.8 List-query scoping — corrected during phase 4, **found by live testing, not a unit test**
+
+§5's original sketch assumed a tutor's unfiltered `feedback` query would come back correctly narrowed by
+the security rule alone, the same way a single-document `get` does. Live testing (signing in as the
+tutor test account in a real browser and inspecting the actual result) proved that wrong: Firestore
+rejects an entirely unfiltered `list` query outright with `PERMISSION_DENIED` once the rule depends on
+per-document data (`resource.data.class in request.auth.token.classes`) — it does not silently filter
+non-matching documents out of a `list` result the way `get` does. Confirmed directly against the
+Firestore REST API, bypassing the client SDK entirely, to rule out an SDK-specific quirk.
+
+Fixed on the client, not in `firestore.rules` (the rule itself was already correct and stays as written
+in §5): a tutor's query now includes `where('class', 'in', classes)`, mirroring the rule's own condition
+exactly, so Firestore can prove the query is rule-safe before running it. Lead/coordinator keep querying
+`feedback` unfiltered, since their branch of the rule (`role in ['lead','coordinator']`) is unconditionally
+true and provable without inspecting any document. See PROGRESS.md "Notable fixes" #15/#16 for the full
+diagnosis, including a compounding client-state bug (a failed tutor query left a previous user's cached
+data on screen) that this also fixed.
+
+### 3.9 The original parent-feedback Google Form turned out to be view-only too — **found live, forced my hand**
+
+§7 already flagged that the master *sheet* is view-only; what wasn't known until Dhruv actually checked
+is that the master's linked *Google Form* is view-only for him as well — a separate Google object with
+its own permissions, not something a sheet-level copy carries over. Google Sheets' `Tools → Create a
+Form` from Dhruv's copy confirmed this independently: it offered to create a brand-new form rather than
+showing any existing link, meaning the copy had never been form-linked at all.
+
+Consequence: the original form's response destination cannot be re-pointed at Dhruv's copy, and Sheets
+provides no way to link a *new* form's responses into an *existing* tab — every linked form gets its own
+dedicated response tab. **Fix:** built a brand-new replica form (question set, options, and order copied
+exactly from the real original form, which is itself publicly viewable even though not editable) and
+linked it via `Tools → Create a Form`, then renamed tabs so the newly-created response tab took over the
+name `Form Responses 1` (which the Apps Script hardcodes) while the historical tab was renamed aside,
+not deleted.
+
+**This is exactly the class of situation §3.5's original idempotency design (`rowId = row_<row number>`)
+never anticipated** — it assumed exactly one `Form Responses 1` tab for the sheet's entire lifetime, an
+assumption that held for the graded assignment's historical data but broke the moment a replacement tab
+had to be swapped in under the same name (its row numbering restarts from 1, colliding with historical
+rows). Corrected by keying Firestore documents off `(sheet_id, row_number)` instead of `row_number`
+alone — `sheet_id` is the tab's own stable internal ID, immune to renames and always fresh on a new tab
+— so this specific failure mode can't recur even if a tab gets swapped again later. Full incident and fix
+in PROGRESS.md "Notable fixes" #18; confirmed live end-to-end afterward (a real form submission through
+the new form landed in Firestore and appeared in the dashboard immediately, no manual steps).
 
 ---
 
@@ -390,13 +441,16 @@ Google Form → Sheet (Dhruv's copy, tab "Form Responses 1")
    → POST /api/feedback/ingest  [Vercel, validates shared secret, resolves tutor via cached roster]
    → Firestore: feedback/{row_N}   (upsert, idempotent)
 
-Vercel Cron (hourly) → GET roster (X-Api-Key header, paginated) → Firestore: staff/{email}
+Vercel Cron (daily, 3am) → GET roster (X-Api-Key header, paginated) → Firestore: staff/{email}
 
-React SPA (Firebase Hosting)
+React SPA (Firebase Hosting — different origin from the Vercel API, CORS-enabled on the two
+browser-facing endpoints only, see §3.4/§3.8)
    → Firebase Auth (email/password, seeded test accounts)
    → POST /api/auth/sync-role  [sets custom claims from staff/{email}]
-   → Firestore onSnapshot (live feedback list, scoped by security rules) + mark-handled writes
-   → POST /api/summary/generate  [Vercel → Gemini, on demand] → Firestore: summaries/{scopeKey}
+   → Firestore onSnapshot (live feedback list, query scoped client-side to match the rule for
+     tutors — see §3.8 — enforcement still lives in the rule itself, not the query) + mark-handled writes
+   → POST /api/summary/generate  [client sends its own already-scoped items; Vercel → Gemini,
+     on demand] → Firestore: summaries/{scopeKey} (audit only, client never reads this back)
 ```
 
 ## 7. Things outside my ability to do — need Dhruv
@@ -431,7 +485,7 @@ React SPA (Firebase Hosting)
 | 1 — Scaffold | Vite+React+TS app, `/api` Vercel functions skeleton, repo layout, first commit | `npm run dev` renders a blank branded shell |
 | 2 — Ingestion pipe | Rewritten Apps Script, `/api/feedback/ingest`, roster sync + cron | Typing a test row into the sheet lands a doc in Firestore within the trigger interval |
 | 3 — Auth & rules | Seeded test accounts, `/api/auth/sync-role`, Firestore security rules, priority-scoring + redaction logic (unit tested) | Each seeded role can log in and sees exactly the scoped/redacted data |
-| 4 — Frontend | Login, live queue (sorted/filterable), mark-as-handled, AI summary panel, Contour-styled UI | Full flow works end-to-end locally against real Firestore |
+| 4 — Frontend | Login, live queue (sorted/filterable), mark-as-handled, AI summary panel, Contour-styled UI | **Met** — full flow verified live, signed in as all 3 seeded roles in a real browser against the deployed backend and real Firestore data. See PROGRESS.md phase 4 writeup. |
 | 5 — Deploy & verify | Firebase Hosting + Vercel deploy, env vars set on both, live smoke test per role | Deployed URL works cold, matches local behavior |
 | 6 — Deliverables | README, decision memo, #ops-requests announcement draft, video shot-list, `.zip` | All 6 deliverables ready to submit |
 

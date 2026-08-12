@@ -8,8 +8,12 @@ and history, but the sheet's own copy (kept in sync by hand) is what actually ru
 
 Installable `onFormSubmit` trigger (fixes the inherited script's actual bug — see
 [PLANNING.md](../PLANNING.md) section 2.2) plus a time-based safety net every 5 minutes. Both converge
-on one `pushRow_` function; delivery is idempotent because the sheet row number becomes the Firestore
-document ID on the backend. Full reasoning in PLANNING.md section 3.5.
+on one `pushRow_` function; delivery is idempotent because `(sheet_id, row_number)` together become the
+Firestore document ID on the backend. `sheet_id` — the tab's stable internal ID, not the row number —
+is what's actually load-bearing: it's what keeps a replacement "Form Responses 1" tab's row numbering
+(which restarts from 1) from colliding with historical rows from whichever tab held that name before.
+See "Notable fixes" #18 in PROGRESS.md for the real incident this was added to prevent, and PLANNING.md
+section 3.5 for the original design reasoning.
 
 ## Setup (do this once per deployment of this file)
 
